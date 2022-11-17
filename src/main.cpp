@@ -9,57 +9,88 @@
 #include "images.h"
 #include <SoftwareSerial.h>
 #include <DHT.h>
-#include "FS.h"
-#include "SD.h"
 #include <TimeLib.h>
 
+#define WIFI_CONFIGURED 0 // 1 - WiFi orqali sozlamalar saqlangandan keyingi holatida ishlaydi;
+                          // 0 - sozlamalarning default holatida ishlaydi;
 #define DEBUG_SERIAL
 // #define AT_SERIAL
-// #define SDMMC_ENABLE
+// #define SSD1306_LCD
+// #define SDTYPE_MMC
+#define SDMMC_ENABLE
 
-#define DHTPIN      27
+#ifdef SDTYPE_MMC
+#include <SD_MMC.h>
+#include "FS.h"
+#else
+#include <SD.h>
+#include "FS.h"
+#endif
+#ifdef SSD1306_LCD
+#include <SSD1306.h>
+#endif
+
+#define DHTPIN      25
 #define DHTTYPE     DHT11
 
 #define VMET_PIN  34
 #define AMET_PIN  35
-#define GSMP_PIN  25
-#define GSMR_PIN  26
+#define GSMP_PIN  4
 #define FRST_PIN  0
+#define GSM_RX    26
+#define GSM_TX    27
+#define RS_RX     16
+#define RS_TX     17
 
 #define AT_CHK      0
 #define AT_CSQ      1
-#define AT_APN      2
-#define AT_NET_ON   3
-#define AT_NET_OFF  4
-#define AT_NET_CHK  5
-#define AT_HTTPGET  6
-#define AT_GPS_ON   7
-#define AT_GPS_OFF  8
-#define AT_LOCATION 9
-#define AT_IP_CHK   10
-#define AT_COPS     11
-#define AT_CCLK     12
-#define ATE_OFF     13
+#define AT_GPRS     2
+#define AT_APN      3
+#define AT_NET_CHK  4
+#define AT_NET_ON   5
+#define AT_GPS_ON   6
+#define AT_GPS_OFF  7
+#define AT_GPS_INF  8
+#define AT_COPS     9
+#define AT_CCLK     10
+#define AT_ECHO_OFF 11
+#define AT_HTTPINIT 12
+#define AT_HTTPCID  13
+#define AT_HTTPURL  14
+#define AT_HTTPGET  15
+#define AT_HTTPTERM 16
+#define AT_HTTPREAD 17
+#define AT_GPS_PWR  18
+#define AT_NET_OFF  19
 
 String commands[] = {
   "AT",
   "AT+CSQ",
-  "AT+CGACT=1",
-  "AT+CGACT=0",
-  "AT+CGACT?",
+  "AT+SAPBR=3,1,\"CONTYPE\",\"GPRS\"",
+  "AT+SAPBR=3,1,\"APN\",\"INTERNET\"",
+  "AT+SAPBR=2,1",
+  "AT+SAPBR=1,1",
   "AT+CGNSPWR=1",
   "AT+CGNSPWR=0",
   "AT+CGNSINF",
   "AT+COPS?",
   "AT+CCLK?",
-  "ATE0"
+  "ATE0",
+  "AT+HTTPINIT",
+  "AT+HTTPPARA=\"CID\",1",
+  "AT+HTTPPARA=\"URL\",\"",
+  "AT+HTTPACTION=0",
+  "AT+HTTPTERM",
+  "AT+HTTPREAD",
+  "AT+SGPIO=0,4,1,1",
+  "AT+SAPBR=0,1"
 };
 
 tmElements_t tm;
 int Year, Month, Day, Hour, Minute, Second, Zone, lastMinute = 0, lastSecond = 0;
 DHT dht(DHTPIN, DHTTYPE);
-SoftwareSerial gsmSerial(33, 32);
-SoftwareSerial RS485Serial(18, 19);
+SoftwareSerial gsmSerial(GSM_RX, GSM_TX);
+SoftwareSerial RS485Serial(RS_RX, RS_TX);
 
 // byte readDistance [8] = {0x01, 0x03, 0x00, 0x01, 0x00, 0x01, 0xD5, 0xCA};
 // byte readLevel [8] = {0x01, 0x03, 0x00, 0x06, 0x00, 0x01, 0x64, 0x0B};
@@ -77,8 +108,8 @@ uint32_t vcounter = 0, curtime_cmd = 0, res_counter = 0, frst_timer = 0;
 uint32_t message_count = 0, httpget_count = 0, start_cmd_time = 0, end_cmd_time = 0;
 String location = "00.0000,00.0000", ip_addr = "0.0.0.0", device_id = "", server_url = "", server_url2 = "";
 String sopn[] = {"Buztel", "Uzmacom", "UzMobile", "Beeline", "Ucell", "Perfectum", "UMS", "UzMobile", "EVO"};
-String file_name = "", gsm_data = "", date_time = "";
-bool sdmmc_detect = 0, gps_state = 0, frst_btn = 0, no_sim = 0;
+String file_name = "", gsm_data = "", date_time = "", cops_name = "";
+bool sdmmc_detect = 0, gps_state = 0, frst_btn = 0, sim_card = 0;
 bool next_cmd = true, waitHttpAction = false, star_project = false, device_lost = 0;
 bool internet = false, queue_stop = 0, time_update = 0;
 float voltage = 0.0, tmp = 0.0, hmt = 0.0, water_level = 0.0;
@@ -125,7 +156,7 @@ String params = "["
     "'name':'timeout',"
     "'label':'Xabar vaqti (minut)',"
     "'type':"+String(INPUTTEXT)+","
-    "'default':'1'"
+    "'default':'5'"
   "},"
   "{"
     "'name':'fixing',"
@@ -153,20 +184,18 @@ struct cmdQueue {
   }
   void sendCmdQueue () {
     if (k > 0) {
-      if (!waitHttpAction) {
-//        Serial.println(cmd[0]);
-        old_cmd_gsm = cmd_id[0];
-        if (cmd_id[0] == AT_HTTPGET) waitHttpAction = true;
-        gsmSerial.println(cmd[0]);
-        start_cmd_time = millis();
-        k --;
-        next_cmd = false;
-        for (int i = 0; i < k; i++) {
-          cmd[i] = cmd[i+1];
-          cmd[i+1] = "";
-          cmd_id[i] = cmd_id[i+1];
-          cmd_id[i+1] = -1;
-        }
+      // Serial.println(cmd[0]);
+      old_cmd_gsm = cmd_id[0];
+      if (cmd_id[0] == AT_HTTPGET) waitHttpAction = true;
+      gsmSerial.println(cmd[0]);
+      start_cmd_time = millis();
+      k --;
+      next_cmd = false;
+      for (int i = 0; i < k; i++) {
+        cmd[i] = cmd[i+1];
+        cmd[i+1] = "";
+        cmd_id[i] = cmd_id[i+1];
+        cmd_id[i+1] = -1;
       }
     }
   }
@@ -198,21 +227,21 @@ void logoutRoot() {
   }
   conf.handleFormRequest(&server, 0);
 }
-void tableRoot1 () {
-  if (!server.authenticate(conf.getValue("username"), conf.getValue("password"))) return server.requestAuthentication(); conf.handleFormRequest(&server, 3);
-}
-void tableRoot2 () {
-  if (!server.authenticate(conf.getValue("username"), conf.getValue("password"))) return server.requestAuthentication(); conf.handleFormRequest(&server, 4);
-}
-void tableRoot3 () {
-  if (!server.authenticate(conf.getValue("username"), conf.getValue("password"))) return server.requestAuthentication(); conf.handleFormRequest(&server, 5);
-}
-void tableRoot4 () {
-  if (!server.authenticate(conf.getValue("username"), conf.getValue("password"))) return server.requestAuthentication(); conf.handleFormRequest(&server, 6);
-}
-void tableRoot5 () {
-  if (!server.authenticate(conf.getValue("username"), conf.getValue("password"))) return server.requestAuthentication(); conf.handleFormRequest(&server, 7);
-}
+// void tableRoot1 () {
+//   if (!server.authenticate(conf.getValue("username"), conf.getValue("password"))) return server.requestAuthentication(); conf.handleFormRequest(&server, 3);
+// }
+// void tableRoot2 () {
+//   if (!server.authenticate(conf.getValue("username"), conf.getValue("password"))) return server.requestAuthentication(); conf.handleFormRequest(&server, 4);
+// }
+// void tableRoot3 () {
+//   if (!server.authenticate(conf.getValue("username"), conf.getValue("password"))) return server.requestAuthentication(); conf.handleFormRequest(&server, 5);
+// }
+// void tableRoot4 () {
+//   if (!server.authenticate(conf.getValue("username"), conf.getValue("password"))) return server.requestAuthentication(); conf.handleFormRequest(&server, 6);
+// }
+// void tableRoot5 () {
+//   if (!server.authenticate(conf.getValue("username"), conf.getValue("password"))) return server.requestAuthentication(); conf.handleFormRequest(&server, 7);
+// }
 
 float fmap(float x, float in_min, float in_max, float out_min, float out_max) {
   return float((x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min);
@@ -240,34 +269,47 @@ void setup() {
   pinMode(VMET_PIN, INPUT);
   pinMode(AMET_PIN, INPUT);
   pinMode(GSMP_PIN, OUTPUT);
-  pinMode(GSMR_PIN, OUTPUT);
   pinMode(FRST_PIN, INPUT_PULLUP);
   gsmSerial.begin(9600);
   RS485Serial.begin(9600);
-  digitalWrite(GSMR_PIN, 1);
-  delay(5000);
-  digitalWrite(GSMR_PIN, 0);
   digitalWrite(GSMP_PIN, 1);
+  delay(300);
+  digitalWrite(GSMP_PIN, 0);
   #ifdef DEBUG_SERIAL
   Serial.println("Wait for GSM modem...");
   #endif
   while (!star_project) {
-    checkCommandGSM();
-    gsmSerial.println("AT");
+    if (gsmSerial.available()) {
+      String dt = gsmSerial.readStringUntil('\n');
+      Serial.println(dt);
+      if (dt.indexOf("+CPIN: READY") >= 0) {
+        star_project = 1;
+        sim_card = 1;
+        break;
+      } else if (dt.indexOf("+CPIN: NOT INSERTED") >= 0) {
+        star_project = 1;
+        sim_card = 0;
+      }
+    }
   }
   #ifdef DEBUG_SERIAL
   Serial.println("Start.");
   #endif
-  queue.init();
-  queue.addQueue(commands[ATE_OFF], ATE_OFF);
-  queue.addQueue(commands[AT_CHK], AT_CHK);
-  queue.addQueue(commands[AT_CSQ], AT_CSQ);
-  queue.addQueue(commands[AT_COPS], AT_COPS);
-  queue.addQueue(commands[AT_APN], AT_APN);
-  queue.addQueue(commands[AT_CCLK], AT_CCLK);
-  queue.addQueue(commands[AT_NET_CHK], AT_NET_CHK);
-  queue.addQueue(commands[AT_GPS_ON], AT_GPS_ON);
-  queue.addQueue(commands[AT_IP_CHK], AT_IP_CHK);
+  if (sim_card) {
+    queue.init();
+    queue.addQueue(commands[AT_ECHO_OFF], AT_ECHO_OFF);
+    queue.addQueue(commands[AT_CHK], AT_CHK);
+    queue.addQueue(commands[AT_CSQ], AT_CSQ);
+    queue.addQueue(commands[AT_COPS], AT_COPS);
+    queue.addQueue(commands[AT_GPRS], AT_GPRS);
+    queue.addQueue(commands[AT_APN], AT_APN);
+    queue.addQueue(commands[AT_NET_ON], AT_NET_ON);
+    queue.addQueue(commands[AT_NET_CHK], AT_NET_CHK);
+    queue.addQueue(commands[AT_CCLK], AT_CCLK);
+    queue.addQueue(commands[AT_GPS_PWR], AT_GPS_PWR);
+    queue.addQueue(commands[AT_GPS_ON], AT_GPS_ON);
+    queue.addQueue(commands[AT_GPS_INF], AT_GPS_INF);
+  }
   dht.begin();
   device_id = WiFi.macAddress();
   device_id.replace(":","");
@@ -275,7 +317,7 @@ void setup() {
   conf.addStatistics("Qurilma ID", device_id);                        // 0 - index Qurilma id
   conf.addStatistics("Joylashuv nuqtasi", location);                  // 1 - index Location
   conf.addStatistics("Internet IP", ip_addr);                         // 2 - index IP
-  conf.addStatistics("Xabarlar soni", String(message_count/6));         // 3 - index Counter
+  conf.addStatistics("Xabarlar soni", String(message_count));         // 3 - index Counter
   conf.addStatistics("Harorat", "26.35");                             // 4 - index Harorat
   conf.addStatistics("Namlik", "30.00");                              // 5 - index Namlik
   conf.addStatistics("Quvvat", "12.45");                              // 6 - index Quvvat
@@ -284,36 +326,35 @@ void setup() {
   conf.addStatistics("Suv tahi", "0");                                // 9 - index Suv sathi
   conf.setDescription(params);
   conf.readConfig();
-  fix_length = conf.getInt("fixing");
   httpget_time = uint8_t(conf.getInt("timeout"));
+  uint64_t wakeup_time = uint64_t(httpget_time * 60000000); // micro seconds 
+  Serial.printf("Deep sleep time: %d min -->> ", httpget_time);
+  Serial.println(wakeup_time);
+  esp_sleep_enable_timer_wakeup(wakeup_time);
+  fix_length = conf.getInt("fixing");
   server_url = conf.getString("server_url");
   server_url2 = conf.getString("server_url2");
-  WiFi.softAP(conf.getValue("ssid"), conf.getValue("pwd"));
-  #ifdef DEBUG_SERIAL
-  Serial.print("WebServer IP-Adress = ");
-  Serial.println(WiFi.softAPIP());
-  #endif
-  server.on("/config", configRoot);
-  server.on("/", HTTP_GET, handleRoot);
-  server.on("/table1", tableRoot1);
-  server.on("/table2", tableRoot2);
-  server.on("/table3", tableRoot3);
-  server.on("/table4", tableRoot4);
-  server.on("/table5", tableRoot5);
-  server.on("/logout", HTTP_GET, logoutRoot);
-  server.begin(80);
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_UNDEFINED) {
+    WiFi.softAP(conf.getValue("ssid"), conf.getValue("pwd"));
+    server.on("/config", configRoot);
+    server.on("/", HTTP_GET, handleRoot);
+    // server.on("/table1", tableRoot1);
+    // server.on("/table2", tableRoot2);
+    // server.on("/table3", tableRoot3);
+    // server.on("/table4", tableRoot4);
+    // server.on("/table5", tableRoot5);
+    server.on("/logout", HTTP_GET, logoutRoot);
+    server.begin(80);
+    #ifdef DEBUG_SERIAL
+    Serial.print("WebServer IP-Adress = ");
+    Serial.println(WiFi.softAPIP());
+    #endif
+  }
   curtime_cmd = millis();
   per_hour_time = millis();
   per_second_time = millis();
   per_mill_time = millis();
   _counter_httpget = httpget_time;
-}
-
-void ESP_restart() {
-  digitalWrite(GSMR_PIN, 1);
-  delay(5000);
-  digitalWrite(GSMR_PIN, 0);
-  ESP.restart();
 }
 
 void loop() {
@@ -327,13 +368,13 @@ void loop() {
   // Sozlamalarni tozalash
   if (!digitalRead(FRST_PIN) && !frst_btn) {
     frst_btn = 1;
-    frst_timer = millis()/1000;
+    frst_timer = millis();
   } else if (!digitalRead(FRST_PIN) && frst_btn) {
-    if (millis()/1000 - frst_timer >= 10) {
+    if (millis() - frst_timer >= 10000) {
       frst_timer = 0;
       conf.deleteConfig(CONFFILE);
       conf.deleteConfig(CONFTABLE);
-      ESP_restart();
+      // esp_restart();
     }
   } else if (digitalRead(FRST_PIN)) {
     frst_btn = 0;
@@ -363,14 +404,6 @@ void loop() {
     }
   }
 
-  uint8_t pRAM = map(ESP.getFreeHeap(), 0, ESP.getHeapSize(), 0, 100);
-  if (pRAM > 90) {
-    if (sdmmc_detect) {
-      appendFile(SD, "/exp.log", " Large heap size !!!");
-    }
-    ESP_restart();
-  }
-
   // batareyka voltini hisoblash va ekranga chiqarish;
   // har 100 millisikundda 1 marta ishlash;
   if (millis() - per_mill_time > 100) {
@@ -389,10 +422,7 @@ void loop() {
     if (voltage > 100) voltage = 100;
     v_percent = int(voltage);
     fix_length = conf.getInt("fixing");
-    if (conf.check_reset == 1){
-      prgs=0;
-      ESP_restart();
-    }
+    
     tmp = dht.readTemperature();
     hmt = dht.readHumidity();
     conf.setStatistics(1, "<a href=https://maps.google.com?q="+location + ">"+location+"</a>");                        // 1 - index Location
@@ -405,17 +435,17 @@ void loop() {
     conf.setStatistics(7, String(dbm) + " dBm");
     conf.setStatistics(8, String(water_cntn) + " T/s");
     conf.setStatistics(9, String(water_level) + " cm");
-    if (next_cmd && !waitHttpAction && !queue_stop) {
+    if (next_cmd && !waitHttpAction && sim_card) {
       queue.addQueue(commands[AT_CSQ], AT_CSQ);
       queue.addQueue(commands[AT_NET_CHK], AT_NET_CHK);
-      queue.addQueue(commands[AT_LOCATION], AT_LOCATION);
+      queue.addQueue(commands[AT_GPS_INF], AT_GPS_INF);
       if (!internet && signal_quality > 1) {
         queue.addQueue(commands[AT_NET_OFF], AT_NET_OFF);
         queue.addQueue(commands[AT_APN], AT_APN);
         queue.addQueue(commands[AT_NET_ON], AT_NET_ON);
-        queue.addQueue(commands[AT_IP_CHK], AT_IP_CHK);
+        queue.addQueue(commands[AT_NET_CHK], AT_NET_CHK);
       }
-      if (!cops) {
+      if (cops_name.length() == 0) {
         queue.addQueue(commands[AT_COPS], AT_COPS);
       }
       if (!time_update) {
@@ -423,18 +453,29 @@ void loop() {
       }
     }
     if (_counter_httpget >= httpget_time) {
-      file_name = "/" + String(year()) + "-" + String(month()) + "-" + String(day()) + ".txt";
-      date_time = String(year()) + "-" + String(month()) + "-" + String(day()) + " " + String(hour()) + ":" + String(minute()) + ":" + String(second());
+      char temp[30];
+      sprintf(temp, "/%02d-%02d-%02d.txt", year(), month(), day());
+      file_name = String (temp);
+      sprintf(temp, "%02d-%02d-%02d %02d:%02d:%02d", year(), month(), day(), hour(), minute(), second());
+      date_time = String(temp);
       if (sdmmc_detect && file_name.length() > 1) {
         appendFile(SD, file_name.c_str(), make_param().c_str());
         File f = SD.open("/cntr.a", FILE_WRITE);
         f.println(message_count);
         f.close();
       }
-      if (!queue_stop && internet) {
-        queue.addQueue(commands[AT_HTTPGET] + server_url + make_param() + "\"", AT_HTTPGET);
+      if (internet && sim_card) {
+        queue.addQueue(commands[AT_HTTPINIT], AT_HTTPINIT);
+        queue.addQueue(commands[AT_HTTPCID], AT_HTTPCID);
+        queue.addQueue(commands[AT_HTTPURL] + server_url + make_param() + "\"", AT_HTTPURL);
+        queue.addQueue(commands[AT_HTTPGET], AT_HTTPGET);
+        queue.addQueue(commands[AT_HTTPTERM], AT_HTTPTERM);
         if (server_url2.length() > 5) {
-          queue.addQueue(commands[AT_HTTPGET] + server_url2 + make_param() + "\"", AT_HTTPGET);
+          queue.addQueue(commands[AT_HTTPINIT], AT_HTTPINIT);
+          queue.addQueue(commands[AT_HTTPCID], AT_HTTPCID);
+          queue.addQueue(commands[AT_HTTPURL] + server_url2 + make_param() + "\"", AT_HTTPURL);
+          queue.addQueue(commands[AT_HTTPGET], AT_HTTPGET);
+          queue.addQueue(commands[AT_HTTPTERM], AT_HTTPTERM);
         }
         _counter_httpget = 0;
         httpget_count ++;
@@ -462,11 +503,12 @@ void loop() {
     }
   }
   // navbatni bo'shatish
-  if (next_cmd && millis() - curtime_cmd > 500 && !queue_stop) {
+  if (millis() - curtime_cmd > 500 && next_cmd && !waitHttpAction && sim_card) {
     curtime_cmd = millis();
     queue.sendCmdQueue();
   }
   if (millis() - start_cmd_time > 10000) {
+    start_cmd_time = millis();
     next_cmd = true;
     cmd_timeout_count ++;
     if (sdmmc_detect) {
@@ -474,53 +516,6 @@ void loop() {
       f.println(date_time + "\t\tGSM timeout: " + String(cmd_timeout_count) + " in 5");
       f.close();
     }
-  }
-  if (cmd_timeout_count >= 5) {
-    cmd_timeout_count = 0;
-    queue_stop = 1;
-    next_cmd = 0;
-    star_project = 0;
-    if (sdmmc_detect) {
-      File f = SD.open("/gsmerr.log", FILE_APPEND);
-      f.println(date_time + "\t\tGSM is turn power off");
-      f.close();
-    }
-    digitalWrite(GSMR_PIN, 1);
-    delay(2000);
-    digitalWrite(GSMR_PIN, 0);
-    delay(10000);
-    digitalWrite(GSMP_PIN, 1);
-    delay(2000);
-    digitalWrite(GSMP_PIN, 0);
-    uint32_t start_t = millis();
-    while (!star_project) {
-      checkCommandGSM();
-      if (millis() - start_t >= 2000) {
-        gsmSerial.println("AT");
-        start_t = millis();
-      }
-    }
-    if (sdmmc_detect) {
-      File f = SD.open("/gsmerr.log", FILE_APPEND);
-      f.println(date_time + "\t\tGSM is turn power off");
-      f.close();
-    }
-    queue_stop = 0;
-    cops = 0;
-    internet = 0;
-    waitHttpAction = 0;
-    ip_addr = "0.0.0.0";
-    queue.init();
-    queue.addQueue(commands[AT_CHK], AT_CHK);
-    queue.addQueue(commands[AT_CSQ], AT_CSQ);
-    queue.addQueue(commands[AT_COPS], AT_COPS);
-    queue.addQueue(commands[AT_APN], AT_APN);
-    queue.addQueue(commands[AT_CCLK], AT_CCLK);
-    queue.addQueue(commands[AT_NET_CHK], AT_NET_CHK);
-    queue.addQueue(commands[AT_GPS_ON], AT_GPS_ON);
-    queue.addQueue(commands[AT_IP_CHK], AT_IP_CHK);
-    _counter_httpget = httpget_time;
-    httpget_count = message_count + err_http_count;
   }
 }
 
@@ -543,42 +538,56 @@ void check_CMD (String str) {
     case AT_CSQ:
       if (str.indexOf("+CSQ") >= 0) {
         csq = str.substring(str.indexOf("+CSQ: ") + 5, str.indexOf(",")).toInt();
+        signal_quality = map(csq, 0, 31, 0, 4);
       }
-    case AT_IP_CHK:
-      if (str.indexOf("+CGDCONT:1") >= 0) {
-        int start_id = str.indexOf("DEFAULT");
-        int end_id = str.indexOf("\",0,0");
-        ip_addr = str.substring(start_id + 10, end_id);
-      }
+      break;
     case AT_NET_CHK:
-      if (str.indexOf("+CGACT: 1") >= 0) {
-        internet = true;
-      } else if (str.indexOf("+CGACT: 0") >= 0){
-        internet = false;
+      if (str.indexOf("+SAPBR") >= 0) {
+        ip_addr = str.substring(str.indexOf("\"") + 1, str.lastIndexOf("\""));
+        int bearer = str.substring(str.indexOf(",") + 1, str.lastIndexOf(",")).toInt();
+        if (bearer == 1) internet = 1;
+        else internet = 0;
       }
-    case AT_LOCATION:
-      if (str.indexOf("+LOCATION") >= 0) {
-        location = "";
-        gps_state = 0;
-      } else if (str.substring(0, str.indexOf(",")).toDouble() > 0.0){
-        location = str;
-        location.trim();
-        gps_state = 1;
+      break;
+    case AT_GPS_INF:
+      if (str.indexOf("++CGNSINF") >= 0) {
+        String temp = str.substring(str.indexOf(":") + 2, str.length());
+        Serial.println(temp);
+        float llong=0.0, llat=0.0, f1=0, f2=0, f3=0, f4=0, f5=0, f6=0;
+        int i1=0, i2=0, i3=0, i4=0, i5=0, i6=0, i7=0, i8=0, i9=0, i10=0, i11=0;
+        char* s1 = NULL;
+        Serial.println(temp);
+        sscanf(temp.c_str(), "%d,%d,%s,%f,%f,%f,%f,%f,%d,%d,%f,%f,%f,%d,%d,%d,%d,%d,%d,%d,", &i1, &i2, s1, &llong, &llat, &f1, &f2, &f3, &i3, &i4, &f4, &f5, &f6, &i5, &i6, &i7, &i8, &i9, &i10, &i11);
+        char loc[15];
+        if (i2 == 1) {
+          gps_state = 1;
+        }
+        sprintf(loc, "%.6f, %.6f", llong, llat);
+        location = String (loc);
       }
+      break;
     case AT_COPS:
       if (str.indexOf("+COPS:") >= 0) {
-        cops = str.substring(str.indexOf(",\"") + 2, str.length()-1).toInt();
+        cops_name = str.substring(str.indexOf(",\"") + 2, str.lastIndexOf(" "));
       }
+      break;
     case AT_HTTPGET:
-      if (str.indexOf("HTTP") >= 0) {
+      if (str.indexOf("+HTTPACTION:") >= 0) {
         waitHttpAction = false;
+        int result = str.substring(str.indexOf(',') + 1, str.lastIndexOf(',')).toInt();
+        if (result == 200) {
+          message_count ++;
+          if (conf.configured == WIFI_CONFIGURED) {
+            digitalWrite(GSMP_PIN, 1);
+            delay(2000);
+            digitalWrite(GSMP_PIN, 0);
+            esp_deep_sleep_start();
+          }
+        } else {
+          err_http_count ++;
+        }
       }
-      if (str.indexOf("HTTP/1.1  200") >= 0) {
-        message_count ++;
-      }
-      else if (str.indexOf("HTTP/1.1  400") >= 0) {
-        err_http_count ++;
-      }
+      break;
     case AT_CCLK:
       if (str.indexOf("+CCLK:") >= 0) {
         date_time = str.substring(str.indexOf("\"") + 1, str.lastIndexOf("\""));
@@ -586,14 +595,6 @@ void check_CMD (String str) {
         date_time = "";
       }
     default:
-      ////////////////////////// CHECK STRING VALUES //////////////////////////////
-      if (str.indexOf("OK") >= 0 || str.indexOf("STN:") >= 0) {
-        star_project = true;
-      }
-      if (str.indexOf("NO SIM") >= 0) {
-        no_sim = true;
-        queue_stop = true;
-      }
       break;
   }
 }
@@ -603,7 +604,7 @@ void createElements(const char *str) {
   tm.Year = CalendarYrToTm(2000 + Year);
   tm.Month = Month;
   tm.Day = Day;
-  tm.Hour = (Hour + Zone) % 24;
+  tm.Hour = Hour;
   tm.Minute = Minute;
   tm.Second = Second;
   setTime(makeTime(tm));

@@ -166,7 +166,7 @@ void WebConfig::setDescription(String parameter){
 
 void WebConfig::addDescription(String parameter){
   DeserializationError error;
-  const int capacity = JSON_ARRAY_SIZE(MAXVALUES) + MAXVALUES*JSON_OBJECT_SIZE(8);
+  const int capacity = JSON_ARRAY_SIZE(MAXVALUES) + MAXVALUES * JSON_OBJECT_SIZE(8);
   DynamicJsonDocument doc(capacity);
   char tmp[50];
   error = deserializeJson(doc, parameter);
@@ -348,6 +348,9 @@ int16_t WebConfig::getIndex(const char * name){
 
 boolean WebConfig::readConfig(const char * filename){
   String line,name,value;
+  if (SPIFFS.exists("/configured.log")) {
+    configured = true;
+  }
   for (int i = 0; i < MAXVALUESTABLE;i++){
     table_values[i] = 0;
   }
@@ -415,6 +418,11 @@ boolean WebConfig::writeTableConfig(const char* filename) {
 boolean WebConfig::writeConfig(const char * filename){
   String val;
   bool table_conf = 0;
+  if (configured == false) {
+    File f = SPIFFS.open("/configured.log", "w");
+    f.println("succes");
+    f.close();
+  }
   File f = SPIFFS.open(CONFTABLE, "w");
   if (f) {
     for (int i = 0; i < MAXVALUESTABLE; i++) {

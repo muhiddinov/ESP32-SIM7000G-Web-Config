@@ -110,6 +110,7 @@ public:
   String values[MAXVALUES];
   uint16_t table_values[MAXVALUESTABLE];
   bool check_reset = false;
+  bool configured = false;
 private:
   char _buf[2000];
   uint8_t _count;
