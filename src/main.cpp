@@ -11,7 +11,7 @@
 #include <DHT.h>
 #include <TimeLib.h>
 
-#define WIFI_CONFIGURED 0 // 1 - WiFi orqali sozlamalar saqlangandan keyingi holatida ishlaydi;
+#define WIFI_CONFIGURED 1 // 1 - WiFi orqali sozlamalar saqlangandan keyingi holatida ishlaydi;
                           // 0 - sozlamalarning default holatida ishlaydi;
 #define DEBUG_SERIAL
 // #define AT_SERIAL
@@ -335,6 +335,7 @@ void setup() {
   server_url = conf.getString("server_url");
   server_url2 = conf.getString("server_url2");
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_UNDEFINED) {
+    conf.configured = false;
     WiFi.softAP(conf.getValue("ssid"), conf.getValue("pwd"));
     server.on("/config", configRoot);
     server.on("/", HTTP_GET, handleRoot);
@@ -464,7 +465,7 @@ void loop() {
         f.println(message_count);
         f.close();
       }
-      if (internet && sim_card) {
+      if (internet && sim_card && gps_state) {
         queue.addQueue(commands[AT_HTTPINIT], AT_HTTPINIT);
         queue.addQueue(commands[AT_HTTPCID], AT_HTTPCID);
         queue.addQueue(commands[AT_HTTPURL] + server_url + make_param() + "\"", AT_HTTPURL);
@@ -550,20 +551,26 @@ void check_CMD (String str) {
       }
       break;
     case AT_GPS_INF:
-      if (str.indexOf("++CGNSINF") >= 0) {
+      if (str.indexOf("+CGNSINF") >= 0) {
         String temp = str.substring(str.indexOf(":") + 2, str.length());
-        Serial.println(temp);
-        float llong=0.0, llat=0.0, f1=0, f2=0, f3=0, f4=0, f5=0, f6=0;
-        int i1=0, i2=0, i3=0, i4=0, i5=0, i6=0, i7=0, i8=0, i9=0, i10=0, i11=0;
-        char* s1 = NULL;
-        Serial.println(temp);
-        sscanf(temp.c_str(), "%d,%d,%s,%f,%f,%f,%f,%f,%d,%d,%f,%f,%f,%d,%d,%d,%d,%d,%d,%d,", &i1, &i2, s1, &llong, &llat, &f1, &f2, &f3, &i3, &i4, &f4, &f5, &f6, &i5, &i6, &i7, &i8, &i9, &i10, &i11);
-        char loc[15];
-        if (i2 == 1) {
-          gps_state = 1;
+        // Serial.println(temp);
+        int gps_stat = temp.substring(0, temp.indexOf(",")).toInt();
+        if (gps_stat == 1) {
+          float llong=0.0, llat=0.0, f1=0, f2=0, f3=0, f4=0, f5=0, f6=0;
+          int i1=0, i2=0, i3=0, i4=0, i5=0, i6=0, i7=0, i8=0, i9=0, i10=0, i11=0;
+          char* s1 = NULL;
+          Serial.println(temp);
+          sscanf(temp.c_str(), "%d,%d,%s,%f,%f,%f,%f,%f,%d,%d,%f,%f,%f,%d,%d,%d,%d,%d,%d,%d,", &i1, &i2, s1, &llong, &llat, &f1, &f2, &f3, &i3, &i4, &f4, &f5, &f6, &i5, &i6, &i7, &i8, &i9, &i10, &i11);
+          char loc[15];
+          sprintf(loc, "%.6f,%.6f", llong, llat);
+          location = String (loc);
+          Serial.println(location);
+          if (llong != 0.0 && llat != 0.0) {
+            gps_state = 1;
+          } else {
+            gps_state = 0;
+          }
         }
-        sprintf(loc, "%.6f, %.6f", llong, llat);
-        location = String (loc);
       }
       break;
     case AT_COPS:
